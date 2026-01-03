@@ -344,6 +344,8 @@ function calcAndShow() {
   window.__lastText = res.text;
 }
 
+window.calcAndShow = calcAndShow; // ★追加
+
 function saveInputs() {
   const payload = {
     egg: int(els.eggCount.value),
