@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>パレット積み計算（たまご / Boss）</title>
+  <meta name="theme-color" content="#111111" />
+  <link rel="manifest" href="manifest.webmanifest">
+  <style>
+    :root { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif; }
+    body { margin: 0; background:#f6f6f6; color:#111; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 16px; }
+    h1 { font-size: 18px; margin: 8px 0 16px; }
+    .card { background:#fff; border-radius: 12px; padding: 14px; box-shadow: 0 1px 6px rgba(0,0,0,.08); margin-bottom: 12px; }
+    label { display:block; font-size: 13px; color:#333; margin: 8px 0 4px; }
+    input[type="number"] { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 10px; font-size: 16px; }
+    .row { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .opts { display:grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+    .opt { display:flex; align-items:center; gap: 10px; font-size: 14px; }
+    .btns { display:flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+    button { border:0; border-radius: 10px; padding: 10px 14px; font-size: 15px; cursor:pointer; }
+    .primary { background:#111; color:#fff; }
+    .ghost { background:#eee; color:#111; }
+    pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 14px; line-height: 1.5; }
+    .small { font-size: 12px; color:#666; margin-top: 8px; }
+    .warn { color:#b00020; font-size: 13px; }
+    .ok { color:#0a7a2f; font-size: 13px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>パレット積み計算（たまごだよ / Boss）</h1>
+
+    <div class="card">
+      <div class="row">
+        <div>
+          <label>たまご 個数</label>
+          <input id="eggCount" type="number" min="0" step="1" value="107">
+        </div>
+        <div>
+          <label>Boss 個数</label>
+          <input id="bossCount" type="number" min="0" step="1" value="74">
+        </div>
+      </div>
+
+      <div class="opts">
+        <div class="opt">
+          <input id="preferOneMixed" type="checkbox" checked>
+          <label for="preferOneMixed" style="margin:0">混載は原則1パレットのみ</label>
+        </div>
+
+        <div class="opt">
+          <input id="autoBossStack2" type="checkbox" checked>
+          <label for="autoBossStack2" style="margin:0">Bossばら置き：乗らない時は2段(2×2)へ自動切替</label>
+        </div>
+
+        <div class="opt">
+          <input id="allowBossStack2" type="checkbox" checked>
+          <label for="allowBossStack2" style="margin:0">Bossばら置き：2段を許可（オフなら常に1段）</label>
+        </div>
+
+        <div class="opt">
+          <label for="eggSoloLayers" style="margin:0">単品たまごの基本段数（おすすめ5）</label>
+          <input id="eggSoloLayers" type="number" min="1" max="6" step="1" value="5" style="width:90px">
+        </div>
+      </div>
+
+      <div class="btns">
+        <button class="primary" id="calcBtn">計算する</button>
+        <button class="ghost" id="copyBtn">結果をコピー</button>
+        <button class="ghost" id="saveBtn">入力を保存</button>
+      </div>
+
+      <div class="small">
+        ルール：高さ制限1440 / たまご=8回し・240mm / Boss=7回し・160mm / 混載時は下たまご→上Boss
+      </div>
+    </div>
+
+    <div class="card">
+      <div id="status"></div>
+      <pre id="out" class="mono"></pre>
+    </div>
+
+    <div class="card">
+      <div class="small mono">
+        ※ ばら置きの高さ計算：下の段高さ + 「最上段の最大高さ（たまご240 or Boss160×(1 or 2)）」を足します。<br>
+        例：たまご3段(720)+Boss2段(320)=1040、最上段でBossを2段にしたら+320 → 1360mm。
+      </div>
+    </div>
+  </div>
+
+<script>
+/** 固定ルール */
+const RULE = {
+  maxH: 1440,
+  egg: { perLayer: 8, h: 240 },
+  boss: { perLayer: 7, h: 160 }
+};
+
+/** 便利 */
+function clamp(n, a, b){ return Math.max(a, Math.min(b, n)); }
+function int(n){ return Number.isFinite(n) ? Math.trunc(n) : 0; }
+function divmod(n, d){ return { q: Math.floor(n / d), r: n % d }; }
+
+/**
+ * パレット1枚の高さ推定
+ * baseEggLayers / baseBossLayers: “段”として積む段数
+ * topEggLoose: 0..7 (たまごのばら)
+ * topBossLoose: 0..6 (Bossのばら)
+ * topBossStackLayers: Bossばら置きの段数（1 or 2）
+ */
+function estimateHeight({baseEggLayers, baseBossLayers, topEggLoose, topBossLoose, topBossStackLayers}) {
+  const base = baseEggLayers * RULE.egg.h + baseBossLayers * RULE.boss.h;
+  const topEggH = topEggLoose > 0 ? RULE.egg.h : 0;
+  const topBossH = topBossLoose > 0 ? RULE.boss.h * topBossStackLayers : 0;
+  const top = Math.max(topEggH, topBossH);
+  return base + top;
+}
+
+/**
+ * 1枚の混載パレットを「制限内でなるべく高く・分かりやすく」作る
+ * まず“段”の組み合わせ（eggLayers, bossLayers）を探し、
+ * 余りは最上段ばら置きに回す（Bossは1段優先、入らなければ2段へ）。
+ */
+function buildOneMixed(eggCount, bossCount, opts) {
+  const egg = { ...divmod(eggCount, RULE.egg.perLayer) };
+  const boss = { ...divmod(bossCount, RULE.boss.perLayer) };
+
+  // “段”として使える最大（ただし上限内で）
+  const maxEggLayers = Math.min(6, egg.q);   // たまごは6段が上限（1440）
+  const maxBossLayers = Math.min(9, boss.q); // Bossは9段が上限（1440）
+
+  let best = null;
+
+  // 段数の探索：分かりやすさのため「たまご下・Boss上」を前提に
+  for (let eL = 0; eL <= maxEggLayers; eL++) {
+    for (let bL = 0; bL <= maxBossLayers; bL++) {
+      // 余りは全部 “上のばら” として扱う想定
+      // （この混載1枚で全部吸収したいので、段数は必要最小）
+      const usedEgg = eL * RULE.egg.perLayer;
+      const usedBoss = bL * RULE.boss.perLayer;
+      const topEggLoose = (eggCount - usedEgg) > 0 ? (eggCount - usedEgg) : 0;
+      const topBossLoose = (bossCount - usedBoss) > 0 ? (bossCount - usedBoss) : 0;
+
+      // 余りが段数に達しているなら、そもそも段で取るべき（探索なので除外）
+      if (topEggLoose >= RULE.egg.perLayer) continue;
+      if (topBossLoose >= RULE.boss.perLayer) continue;
+
+      // Bossばら置きは基本1段。入らなければ2段を検討
+      const canStack2 = opts.allowBossStack2;
+      const preferAuto = opts.autoBossStack2;
+
+      const candidatesBossTopLayers = [];
+      // まず1段
+      candidatesBossTopLayers.push(1);
+      // 2段も許可
+      if (canStack2) candidatesBossTopLayers.push(2);
+
+      for (const topBossStackLayers of candidatesBossTopLayers) {
+        const h = estimateHeight({baseEggLayers:eL, baseBossLayers:bL, topEggLoose, topBossLoose, topBossStackLayers});
+
+        // 制限内のみ
+        if (h > RULE.maxH) continue;
+
+        // スコア：高い方がよい（なるべく高く＝他パレットと寄せやすい）
+        // ただし、ばらが多すぎるのは避けたいので軽くペナルティ
+        const loosePenalty = (topEggLoose>0?1:0) + (topBossLoose>0?1:0);
+        const stackPenalty = (topBossLoose>0 && topBossStackLayers===2) ? 0.2 : 0; // 2段は少しだけペナルティ
+        const score = h - loosePenalty*10 - stackPenalty*10;
+
+        // 「自動切替ON」なら、同点なら1段優先（2段は必要時だけ）
+        const tieBreak = () => {
+          if (!best) return true;
+          if (score !== best.score) return score > best.score;
+          if (preferAuto) {
+            // 1段の方を優先
+            return topBossStackLayers < best.topBossStackLayers;
+          }
+          return false;
+        };
+
+        if (!best || tieBreak()) {
+          best = {
+            baseEggLayers: eL,
+            baseBossLayers: bL,
+            topEggLoose,
+            topBossLoose,
+            topBossStackLayers,
+            height: h,
+            score
+          };
+        }
+      }
+    }
+  }
+
+  if (!best) return null;
+  return best;
+}
+
+/**
+ * 全体プラン作成（あなたの希望：混載は原則1枚、単品で分かりやすく、高さはなるべく近づける）
+ * 方針：
+ * - たまご単品は基本 eggSoloLayers（デフォ5段）で刻む
+ * - Boss単品は8段(=1280)優先で刻む（必要なら9段も可）
+ * - 残りを混載1枚で吸収（できなければ例外的に混載2枚）
+ */
+function planPallets(eggCount, bossCount, opts) {
+  eggCount = Math.max(0, int(eggCount));
+  bossCount = Math.max(0, int(bossCount));
+
+  const eggDM = divmod(eggCount, RULE.egg.perLayer);
+  const bossDM = divmod(bossCount, RULE.boss.perLayer);
+
+  const lines = [];
+  lines.push(`たまご　${eggCount}個　${eggDM.q}・・・${eggDM.r}`);
+  lines.push(`Boss　　${bossCount}個　${bossDM.q}・・・${bossDM.r}`);
+  lines.push(``);
+
+  const pallets = [];
+  const eggSoloLayers = clamp(int(opts.eggSoloLayers), 1, 6);
+
+  // 1) たまご単品（基本段数で刻む）
+  //    ただし混載を1枚にするため、残りを混載に回す余地を残す（やりすぎない）
+  //    ここでは「たまご段数が6を超える分」を優先的に単品化する
+  while (eggCount >= RULE.egg.perLayer * eggSoloLayers) {
+    // もしこのまま刻むと最後の混載が極端に低くなる場合は止める（軽い抑制）
+    // 目安：残りたまごが 0〜(2段程度) かつ Bossが少ないなら止める
+    const remainEgg = eggCount - RULE.egg.perLayer * eggSoloLayers;
+    if (opts.preferOneMixed) {
+      const remainEggLayers = Math.floor(remainEgg / RULE.egg.perLayer);
+      const remainBossLayers = Math.floor(bossCount / RULE.boss.perLayer);
+      if (remainEggLayers <= 2 && remainBossLayers <= 2) break;
+    }
+
+    pallets.push({
+      type: "egg",
+      eggLayers: eggSoloLayers,
+      eggLoose: 0,
+      bossLayers: 0,
+      bossLoose: 0,
+      topBossStackLayers: 1,
+      height: eggSoloLayers * RULE.egg.h
+    });
+    eggCount -= RULE.egg.perLayer * eggSoloLayers;
+  }
+
+  // 2) Boss単品（8段=1280優先、無理なら9段）
+  while (bossCount >= RULE.boss.perLayer * 8) {
+    // 残りの状況により8段/9段を選ぶ：基本8段
+    const useLayers = 8;
+    pallets.push({
+      type: "boss",
+      eggLayers: 0,
+      eggLoose: 0,
+      bossLayers: useLayers,
+      bossLoose: 0,
+      topBossStackLayers: 1,
+      height: useLayers * RULE.boss.h
+    });
+    bossCount -= RULE.boss.perLayer * useLayers;
+  }
+
+  // 3) 残りを混載で吸収（原則1枚）
+  if (eggCount > 0 || bossCount > 0) {
+    const mixed = buildOneMixed(eggCount, bossCount, opts);
+    if (!mixed) {
+      // どうしても作れない場合は、段の取り方を変えて2枚に分割（例外）
+      // ここは“保険”。通常の数量ではほぼ起きない想定。
+      return {
+        ok: false,
+        message: "混載パレットが制限内で作れません。ばら置きのルール/段数設定を見直してください。",
+        text: lines.join("\n"),
+      };
+    }
+
+    pallets.push({
+      type: "mixed",
+      eggLayers: mixed.baseEggLayers,
+      eggLoose: mixed.topEggLoose,
+      bossLayers: mixed.baseBossLayers,
+      bossLoose: mixed.topBossLoose,
+      topBossStackLayers: mixed.topBossStackLayers,
+      height: mixed.height
+    });
+
+    // 混載で全吸収できた想定（buildOneMixedは“残り全部を上へ”の前提）
+    eggCount = 0;
+    bossCount = 0;
+  }
+
+  // 表示作成
+  pallets.forEach((p, idx) => {
+    lines.push(`＜パレット${idx+1}＞（高さ目安：${p.height}mm）`);
+    if (p.type === "egg") {
+      lines.push(`たまご　${p.eggLayers}段`);
+    } else if (p.type === "boss") {
+      lines.push(`Boss　${p.bossLayers}段`);
+    } else {
+      // あなたの書き方に寄せる（ばらは最後へ）
+      // 例：たまご 3段 + Boss 3段 + たまご3個 + Boss4個
+      const parts = [];
+      if (p.eggLayers > 0) parts.push(`たまご　${p.eggLayers}段`);
+      if (p.bossLayers > 0) parts.push(`Boss　${p.bossLayers}段`);
+      if (p.eggLoose > 0) parts.push(`たまご　${p.eggLoose}個`);
+      if (p.bossLoose > 0) parts.push(`Boss　${p.bossLoose}個（ばら：${p.topBossStackLayers}段扱い）`);
+      lines.push(parts.join("　＋　"));
+    }
+    lines.push("");
+  });
+
+  return {
+    ok: true,
+    message: `パレット数：${pallets.length}`,
+    pallets,
+    text: lines.join("\n")
+  };
+}
+
+/** UI */
+const els = {
+  eggCount: document.getElementById("eggCount"),
+  bossCount: document.getElementById("bossCount"),
+  preferOneMixed: document.getElementById("preferOneMixed"),
+  autoBossStack2: document.getElementById("autoBossStack2"),
+  allowBossStack2: document.getElementById("allowBossStack2"),
+  eggSoloLayers: document.getElementById("eggSoloLayers"),
+  calcBtn: document.getElementById("calcBtn"),
+  copyBtn: document.getElementById("copyBtn"),
+  saveBtn: document.getElementById("saveBtn"),
+  out: document.getElementById("out"),
+  status: document.getElementById("status"),
+};
+
+function getOpts() {
+  return {
+    preferOneMixed: !!els.preferOneMixed.checked,
+    autoBossStack2: !!els.autoBossStack2.checked,
+    allowBossStack2: !!els.allowBossStack2.checked,
+    eggSoloLayers: int(els.eggSoloLayers.value || 5),
+  };
+}
+
+function renderStatus(ok, msg) {
+  els.status.innerHTML = ok
+    ? `<div class="ok">✅ ${escapeHtml(msg)}</div>`
+    : `<div class="warn">⚠️ ${escapeHtml(msg)}</div>`;
+}
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, (c)=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+}
+
+function calcAndShow() {
+  const egg = int(els.eggCount.value);
+  const boss = int(els.bossCount.value);
+  const opts = getOpts();
+
+  const res = planPallets(egg, boss, opts);
+  renderStatus(res.ok, res.ok ? res.message : res.message);
+  els.out.textContent = res.text;
+  window.__lastText = res.text;
+}
+
+function saveInputs() {
+  const payload = {
+    egg: int(els.eggCount.value),
+    boss: int(els.bossCount.value),
+    opts: getOpts(),
+  };
+  localStorage.setItem("pallet_app_v1", JSON.stringify(payload));
+  renderStatus(true, "入力を保存しました（端末内）");
+}
+
+function loadInputs() {
+  const raw = localStorage.getItem("pallet_app_v1");
+  if (!raw) return;
+  try {
+    const p = JSON.parse(raw);
+    if (typeof p.egg === "number") els.eggCount.value = p.egg;
+    if (typeof p.boss === "number") els.bossCount.value = p.boss;
+    if (p.opts) {
+      if ("preferOneMixed" in p.opts) els.preferOneMixed.checked = !!p.opts.preferOneMixed;
+      if ("autoBossStack2" in p.opts) els.autoBossStack2.checked = !!p.opts.autoBossStack2;
+      if ("allowBossStack2" in p.opts) els.allowBossStack2.checked = !!p.opts.allowBossStack2;
+      if ("eggSoloLayers" in p.opts) els.eggSoloLayers.value = int(p.opts.eggSoloLayers || 5);
+    }
+  } catch (_) {}
+}
+
+async function copyResult() {
+  const text = window.__lastText || els.out.textContent || "";
+  try {
+    await navigator.clipboard.writeText(text);
+    renderStatus(true, "結果をコピーしました");
+  } catch {
+    // fallback
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+    renderStatus(true, "結果をコピーしました（互換モード）");
+  }
+}
+
+els.calcBtn.addEventListener("click", calcAndShow);
+els.saveBtn.addEventListener("click", saveInputs);
+els.copyBtn.addEventListener("click", copyResult);
+
+// 初期化
+loadInputs();
+calcAndShow();
+
+// Service Worker (PWA) 登録（ローカルfile://だと動きません。http(s)で配信時に有効）
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw.js").catch(()=>{});
+  });
+}
+</script>
+</body>
+</html>
